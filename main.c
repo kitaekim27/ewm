@@ -36,13 +36,13 @@ struct client {
     float aspect_ratio_min;
     float aspect_ratio_max;
 
-    int64_t coord_x;
-    int64_t coord_y;
-    int64_t coord_w;
-    int64_t coord_h;
+    int16_t x;
+    int16_t y;
+    int16_t width;
+    int16_t height;
+    int16_t border_width;
 
     int64_t basew, baseh, incw, inch, maxw, maxh, minw, minh;
-    int64_t bw, oldbw;
 
     bool is_fixed;
     bool is_floating;
@@ -84,7 +84,7 @@ struct monitor {
 
     uint8_t enabled_tags;  // bitmap.
 
-    struct client *clients;
+    list_head_t clients;
     struct client *focused_client;
 
     struct list_node list_node;
@@ -152,6 +152,7 @@ int update_monitors(void)
         (xcb_randr_get_output_info_cookie_t *)calloc(outputs_len,
                                                      sizeof(xcb_randr_get_output_info_cookie_t));
     if (get_output_info_cookies == NULL) { return 1; }
+
     for (uint64_t i = 0; i < outputs_len; ++i) {
         get_output_info_cookies[i] =
             xcb_randr_get_output_info(global_xconnection, outputs[i], XCB_CURRENT_TIME);
@@ -251,10 +252,71 @@ int x11_init(void)
     return 0;
 }
 
+struct client *locate_client(xcb_window_t window)
+{
+    for (struct list_node *monitor_cursor = global_monitors; monitor_cursor != NULL;
+         monitor_cursor = monitor_cursor->next) {
+        struct monitor *monitor = container_of(monitor_cursor, struct monitor, list_node);
+        for (struct list_node *client_cursor = monitor->clients; client_cursor != NULL;
+             client_cursor = client_cursor->next) {
+            struct client *client = container_of(client_cursor, struct client, list_node);
+            if (client->window == window) { return client; }
+        }
+    }
+    return NULL;
+}
+
 void handle_button_press(xcb_button_press_event_t *event) {}
 void handle_client_message(xcb_client_message_event_t *event) {}
 void handle_configure_notify(xcb_configure_notify_event_t *event) {}
-void handle_configure_request(xcb_configure_request_event_t *event) {}
+
+void handle_configure_request(xcb_configure_request_event_t *event)
+{
+    // DEBUG
+    fprintf(stdout, "DEBUG: handle_configure_request()\n");
+    fprintf(stdout, "DEBUG: event->parent=%u\n", event->parent);
+    fprintf(stdout, "DEBUG: event->window=%u\n", event->window);
+
+    struct client *client = locate_client(event->parent);
+    if (client == NULL) {
+        uint32_t values[7];
+        uint8_t values_idx = 0;
+
+        if (event->value_mask & XCB_CONFIG_WINDOW_X) { values[values_idx++] = event->x; }
+        if (event->value_mask & XCB_CONFIG_WINDOW_Y) { values[values_idx++] = event->y; }
+        if (event->value_mask & XCB_CONFIG_WINDOW_WIDTH) { values[values_idx++] = event->width; }
+        if (event->value_mask & XCB_CONFIG_WINDOW_HEIGHT) { values[values_idx++] = event->height; }
+        if (event->value_mask & XCB_CONFIG_WINDOW_BORDER_WIDTH) {
+            values[values_idx++] = event->border_width;
+        }
+        if (event->value_mask & XCB_CONFIG_WINDOW_SIBLING) {
+            values[values_idx++] = event->sibling;
+        }
+        if (event->value_mask & XCB_CONFIG_WINDOW_STACK_MODE) {
+            values[values_idx++] = event->stack_mode;
+        }
+
+        xcb_configure_window(global_xconnection, event->window, event->value_mask, values);
+        return;
+    }
+
+    xcb_configure_notify_event_t notify_event;
+
+    notify_event.response_type = XCB_CONFIGURE_NOTIFY;
+    notify_event.event = client->window;
+    notify_event.window = client->window;
+    notify_event.above_sibling = XCB_NONE;
+    notify_event.x = client->x;
+    notify_event.y = client->y;
+    notify_event.width = client->width;
+    notify_event.height = client->height;
+    notify_event.border_width = client->border_width;
+    notify_event.override_redirect = false;
+
+    xcb_send_event(global_xconnection, false, event->window, XCB_EVENT_MASK_STRUCTURE_NOTIFY,
+                   (const char *)&notify_event);
+}
+
 void handle_destroy_notify(xcb_destroy_notify_event_t *event) {}
 void handle_enter_notify(xcb_enter_notify_event_t *event) {}
 void handle_focus_in(xcb_focus_in_event_t *event) {}

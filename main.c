@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <xcb/randr.h>
 #include <xcb/xcb.h>
+#include <xcb/xcb_event.h>
 
 #define MASK_TAG0 (0)
 #define MASK_TAG1 (1)
@@ -47,7 +48,7 @@ struct client {
     bool is_floating;
     bool is_fullscreen;
     bool is_urgent;
-    bool should_not_focus;
+    bool never_focus;
 
     struct monitor *monitor;
     xcb_window_t window;
@@ -165,17 +166,17 @@ int update_monitors(void)
             global_xconnection,
             xcb_randr_get_crtc_info(global_xconnection, output_info_reply->crtc, XCB_CURRENT_TIME),
             NULL);
-        if (crtc_info_reply == NULL) { goto OUTPUT_INFO_REPLY_FREE; }
-        if (is_unique_crtc(crtc_info_reply) == false) { goto CRTC_INFO_REPLY_FREE; }
+        if (crtc_info_reply == NULL || is_unique_crtc(crtc_info_reply) == false) {
+            goto LOOP_CLEANUP;
+        }
 
         list_add(&global_monitors,
                  &monitor_create(outputs[i], crtc_info_reply->x, crtc_info_reply->y,
                                  crtc_info_reply->width, crtc_info_reply->height)
                       ->list_node);
 
-    CRTC_INFO_REPLY_FREE:
+    LOOP_CLEANUP:
         free(crtc_info_reply);
-    OUTPUT_INFO_REPLY_FREE:
         free(output_info_reply);
     }
 
@@ -250,9 +251,72 @@ int x11_init(void)
     return 0;
 }
 
+void handle_button_press(xcb_button_press_event_t *event) {}
+void handle_client_message(xcb_client_message_event_t *event) {}
+void handle_configure_notify(xcb_configure_notify_event_t *event) {}
+void handle_configure_request(xcb_configure_request_event_t *event) {}
+void handle_destroy_notify(xcb_destroy_notify_event_t *event) {}
+void handle_enter_notify(xcb_enter_notify_event_t *event) {}
+void handle_focus_in(xcb_focus_in_event_t *event) {}
+void handle_mapping_notify(xcb_mapping_notify_event_t *event) {}
+void handle_map_request(xcb_map_request_event_t *event) {}
+void handle_motion_notify(xcb_motion_notify_event_t *event) {}
+void handle_property_notify(xcb_property_notify_event_t *event) {}
+void handle_unmap_notify(xcb_unmap_notify_event_t *event) {}
+
+void handle_event(xcb_generic_event_t *event)
+{
+    switch (XCB_EVENT_RESPONSE_TYPE(event)) {
+    case XCB_BUTTON_PRESS:
+        handle_button_press((xcb_button_press_event_t *)event);
+        break;
+    case XCB_CLIENT_MESSAGE:
+        handle_client_message((xcb_client_message_event_t *)event);
+        break;
+    case XCB_CONFIGURE_NOTIFY:
+        handle_configure_notify((xcb_configure_notify_event_t *)event);
+        break;
+    case XCB_CONFIGURE_REQUEST:
+        handle_configure_request((xcb_configure_request_event_t *)event);
+        break;
+    case XCB_DESTROY_NOTIFY:
+        handle_destroy_notify((xcb_destroy_notify_event_t *)event);
+        break;
+    case XCB_ENTER_NOTIFY:
+        handle_enter_notify((xcb_enter_notify_event_t *)event);
+        break;
+    case XCB_FOCUS_IN:
+        handle_focus_in((xcb_focus_in_event_t *)event);
+        break;
+    case XCB_MAPPING_NOTIFY:
+        handle_mapping_notify((xcb_mapping_notify_event_t *)event);
+        break;
+    case XCB_MAP_REQUEST:
+        handle_map_request((xcb_map_request_event_t *)event);
+        break;
+    case XCB_MOTION_NOTIFY:
+        handle_motion_notify((xcb_motion_notify_event_t *)event);
+        break;
+    case XCB_PROPERTY_NOTIFY:
+        handle_property_notify((xcb_property_notify_event_t *)event);
+        break;
+    case XCB_UNMAP_NOTIFY:
+        handle_unmap_notify((xcb_unmap_notify_event_t *)event);
+        break;
+    }
+}
+
 int main(int argc, char *argv[])
 {
     x11_init();
+
+    while (true) {
+        xcb_generic_event_t *event = xcb_poll_for_event(global_xconnection);
+        if (event == NULL) { continue; }
+        handle_event(event);
+        free(event);
+    }
+
     xcb_disconnect(global_xconnection);
     return 0;
 }

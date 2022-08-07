@@ -96,6 +96,9 @@ static xcb_connection_t *global_xconnection = NULL;
 static list_head_t global_monitors = NULL;
 static xcb_screen_t *global_screen = NULL;
 
+static uint16_t global_screen_width = NULL;
+static uint16_t global_screen_height = NULL;
+
 struct monitor *monitor_create(xcb_randr_output_t output, int16_t crtc_x, int16_t crtc_y,
                                size_t crtc_width, size_t crtc_height)
 {
@@ -268,7 +271,15 @@ struct client *locate_client(xcb_window_t window)
 
 void handle_button_press(xcb_button_press_event_t *event) {}
 void handle_client_message(xcb_client_message_event_t *event) {}
-void handle_configure_notify(xcb_configure_notify_event_t *event) {}
+
+void handle_configure_notify(xcb_configure_notify_event_t *event)
+{
+    if (event->window != global_screen->root) {
+        return;
+    }
+    global_screen_width = event->width;
+    global_screen_width = event->height;
+}
 
 void handle_configure_request(xcb_configure_request_event_t *event)
 {

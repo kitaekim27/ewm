@@ -5,6 +5,7 @@
 #include <xcb/randr.h>
 #include <xcb/xcb.h>
 #include <xcb/xcb_event.h>
+#include <xcb/xcb_icccm.h>
 
 #define MASK_TAG0 (0)
 #define MASK_TAG1 (1)
@@ -31,18 +32,26 @@ typedef struct list_node *list_head_t;
 
 struct client {
     char name[256];
-    uint8_t enabled_tags;  // bitmap.
+    uint8_t enabled_tags;
 
-    float aspect_ratio_min;
-    float aspect_ratio_max;
+    float min_aspect_ratio;
+    float max_aspect_ratio;
+
+    int16_t max_width;
+    int16_t max_height;
+    int16_t min_width;
+    int16_t min_height;
+
+    int16_t base_width;
+    int16_t base_height;
+    int16_t width_inc;
+    int16_t height_inc;
 
     int16_t x;
     int16_t y;
     int16_t width;
     int16_t height;
     int16_t border_width;
-
-    int64_t basew, baseh, incw, inch, maxw, maxh, minw, minh;
 
     bool is_fixed;
     bool is_floating;
@@ -64,41 +73,64 @@ struct layout {
 struct monitor {
     xcb_randr_output_t output;
 
-    float master_area_fraction;
-    uint8_t master_area_num;
-
-    // size_t screen_size_x;
-    // size_t screen_size_y;
-    // size_t screen_size_w;
-    // size_t screen_size_h;
+    float main_area_fraction;
+    uint8_t main_area_win_num;
 
     int16_t crtc_x;
     int16_t crtc_y;
     uint16_t crtc_width;
     uint16_t crtc_height;
 
-    size_t screen_gap_top;
-    size_t screen_gap_bottom;
-    size_t screen_gap_left;
-    size_t screen_gap_right;
+    uint16_t gap_top;
+    uint16_t gap_bottom;
+    uint16_t gap_left;
+    uint16_t gap_right;
 
-    uint8_t enabled_tags;  // bitmap.
+    uint8_t enabled_tags;
 
     list_head_t clients;
     struct client *focused_client;
 
-    struct list_node list_node;
+    struct layout layouts[2];
 
-    struct layout layout;
+    struct list_node list_node;
 };
 
 static xcb_connection_t *global_xconnection = NULL;
-static list_head_t global_monitors = NULL;
-static xcb_screen_t *global_screen = NULL;
 
-static uint16_t global_screen_width = NULL;
-static uint16_t global_screen_height = NULL;
+static xcb_screen_t *global_screen = NULL;
+static uint16_t global_screen_width = 0;
+static uint16_t global_screen_height = 0;
+
+static list_head_t global_monitors = NULL;
 static struct monitor *global_focused_monitor = NULL;
+
+int client_set_size_hints(struct client *client)
+{
+    xcb_size_hints_t size_hints;
+    if (xcb_icccm_get_wm_normal_hints_reply(
+            global_xconnection, xcb_icccm_get_wm_normal_hints(global_xconnection, client->window),
+            &size_hints, NULL) != 0) {
+        return 1;
+    }
+
+    if (size_hints.flags & XCB_ICCCM_SIZE_HINT_BASE_SIZE) {
+        client->base_width = size_hints.base_width;
+        client->base_height = size_hints.base_height;
+    }
+
+    if (size_hints.flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) {
+        client->min_width = size_hints.min_width;
+        client->min_height = size_hints.min_height;
+    }
+
+    if (size_hints.flags & XCB_ICCCM_SIZE_HINT_P_ASPECT) {
+        client->min_aspect_ratio = (float)size_hints.min_aspect_num / size_hints.min_aspect_den;
+        client->max_aspect_ratio = (float)size_hints.max_aspect_num / size_hints.max_aspect_den;
+    }
+
+    return 0;
+}
 
 struct client *client_create(struct monitor *monitor, xcb_window_t window, int16_t x, int16_t y,
                              int16_t width, int16_t height, int16_t border_width)
@@ -112,6 +144,10 @@ struct client *client_create(struct monitor *monitor, xcb_window_t window, int16
     new_client->width = width;
     new_client->height = height;
     new_client->border_width = border_width;
+    if (client_set_size_hints(new_client) != 0) {
+        free(new_client);
+        return NULL;
+    }
     return new_client;
 }
 
@@ -191,9 +227,9 @@ int update_monitors(void)
         }
 
         list_append(&global_monitors,
-                 &monitor_create(outputs[i], crtc_info_reply->x, crtc_info_reply->y,
-                                 crtc_info_reply->width, crtc_info_reply->height)
-                      ->list_node);
+                    &monitor_create(outputs[i], crtc_info_reply->x, crtc_info_reply->y,
+                                    crtc_info_reply->width, crtc_info_reply->height)
+                         ->list_node);
 
     LOOP_CLEANUP:
         free(crtc_info_reply);
@@ -291,8 +327,8 @@ void handle_client_message(xcb_client_message_event_t *event) {}
 void handle_configure_notify(xcb_configure_notify_event_t *event)
 {
     if (event->window != global_screen->root) { return; }
-    global_screen_width = event->width;
-    global_screen_width = event->height;
+    global_screen_height = event->width;
+    global_screen_height = event->height;
 }
 
 void handle_configure_request(xcb_configure_request_event_t *event)
@@ -353,12 +389,12 @@ void client_resize(struct client *client, int16_t x, int16_t y, int16_t width, i
 
 void tile(struct monitor *monitor)
 {
-    uint16_t master_area_width = monitor->crtc_width * monitor->master_area_fraction;
-    uint16_t master_area_height = monitor->crtc_height / monitor->master_area_num;
+    uint16_t master_area_width = monitor->crtc_width * monitor->main_area_fraction;
+    uint16_t master_area_height = monitor->crtc_height / monitor->main_area_win_num;
 
     uint64_t clients_idx = 0;
     struct list_node *clients_cursor = monitor->clients;
-    while (clients_cursor != NULL && clients_idx <= monitor->master_area_num) {
+    while (clients_cursor != NULL && clients_idx <= monitor->main_area_win_num) {
         struct client *client = container_of(clients_cursor, struct client, list_node);
         client_resize(client, monitor->crtc_x, monitor->crtc_y + master_area_height * clients_idx,
                       master_area_width, master_area_height);
@@ -399,8 +435,9 @@ void handle_map_request(xcb_map_request_event_t *event)
     // TODO: Set properties of new_client properly.
     list_append(&global_focused_monitor->clients, &new_client->list_node);
     tile(global_focused_monitor);
-	// XSelectInput(dpy, w, EnterWindowMask|FocusChangeMask|PropertyChangeMask|StructureNotifyMask);
-	// grabbuttons(c, 0);
+    // XSelectInput(dpy, w,
+    // EnterWindowMask|FocusChangeMask|PropertyChangeMask|StructureNotifyMask); grabbuttons(c,
+    // 0);
     xcb_map_window(global_xconnection, event->window);
 }
 

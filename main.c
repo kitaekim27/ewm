@@ -86,12 +86,17 @@ struct monitor {
     uint16_t gap_left;
     uint16_t gap_right;
 
+    int16_t x;
+    int16_t y;
+    uint16_t width;
+    uint16_t height;
+
     uint8_t enabled_tags;
 
     list_head_t clients;
     struct client *focused_client;
 
-    struct layout layouts[2];
+    struct layout layouts[1];
     uint8_t current_layout;
 
     struct list_node list_node;
@@ -116,26 +121,6 @@ static inline int16_t client_width(struct client *client)
 static inline int16_t client_height(struct client *client)
 {
     return client->height + 2 * client->border_width;
-}
-
-static inline int16_t monitor_x(struct monitor *monitor)
-{
-    return monitor->crtc_x + monitor->gap_left;
-}
-
-static inline int16_t monitor_y(struct monitor *monitor)
-{
-    return monitor->crtc_y + monitor->gap_top;
-}
-
-static inline uint16_t monitor_width(struct monitor *monitor)
-{
-    return monitor->crtc_width - monitor->gap_right;
-}
-
-static inline uint16_t monitor_height(struct monitor *monitor)
-{
-    return monitor->crtc_height - monitor->gap_bottom;
 }
 
 int client_set_size_hints(struct client *client)
@@ -186,6 +171,48 @@ struct client *client_create(struct monitor *monitor, xcb_window_t window, int16
     return new_client;
 }
 
+void window_move_resize(xcb_window_t window, int16_t x, int16_t y, int16_t width, int16_t height)
+{
+    uint32_t values[] = {x, y, width, height};
+    xcb_configure_window(global_xconnection, window,
+                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH |
+                             XCB_CONFIG_WINDOW_HEIGHT,
+                         values);
+}
+
+void tile(struct monitor *monitor)
+{
+    uint16_t master_area_width = monitor->width * monitor->main_area_fraction;
+    uint16_t master_area_height = monitor->height / monitor->main_area_win_num;
+
+    uint64_t clients_idx = 0;
+    struct list_node *clients_cursor = monitor->clients;
+    while (clients_cursor != NULL && clients_idx <= monitor->main_area_win_num) {
+        struct client *client = container_of(clients_cursor, struct client, list_node);
+        window_move_resize(client->window, monitor->x,
+                           monitor->y + master_area_height * clients_idx, master_area_width,
+                           master_area_height);
+        clients_cursor = clients_cursor->next;
+        ++clients_idx;
+    }
+    // TODO: Manage a number of clients.
+    uint64_t clients_left_num = 0;
+    for (struct list_node *cursor = clients_cursor; cursor != NULL; cursor = cursor->next) {
+        ++clients_left_num;
+    }
+
+    clients_idx = 0;
+    uint16_t slave_area_width = monitor->width - master_area_width;
+    uint16_t slave_area_height = monitor->height / clients_left_num;
+    while (clients_cursor != NULL) {
+        struct client *client = container_of(clients_cursor, struct client, list_node);
+        window_move_resize(client->window, monitor->x + master_area_width,
+                           monitor->y + slave_area_height * clients_idx, slave_area_width,
+                           slave_area_height);
+        clients_cursor = clients_cursor->next;
+    }
+}
+
 struct monitor *monitor_create(xcb_randr_output_t output, int16_t crtc_x, int16_t crtc_y,
                                size_t crtc_width, size_t crtc_height)
 {
@@ -193,10 +220,24 @@ struct monitor *monitor_create(xcb_randr_output_t output, int16_t crtc_x, int16_
     if (new_monitor == NULL) {
         return NULL;
     }
+    new_monitor->output = output;
+    new_monitor->main_area_fraction = 0.6;
+    new_monitor->main_area_win_num = 1;
     new_monitor->crtc_x = crtc_x;
     new_monitor->crtc_y = crtc_y;
     new_monitor->crtc_width = crtc_width;
     new_monitor->crtc_height = crtc_height;
+    new_monitor->gap_top = 8;
+    new_monitor->gap_bottom = 8;
+    new_monitor->gap_left = 8;
+    new_monitor->gap_right = 8;
+    new_monitor->x = new_monitor->crtc_x + new_monitor->gap_left;
+    new_monitor->y = new_monitor->crtc_y + new_monitor->gap_top;
+    new_monitor->width = new_monitor->crtc_width - new_monitor->gap_right;
+    new_monitor->height = new_monitor->crtc_height - new_monitor->gap_bottom;
+    struct layout layout_tile = {.name = "tile", .arrange = tile};
+    new_monitor->layouts[0] = layout_tile;
+    new_monitor->current_layout = 0;
     return new_monitor;
 }
 
@@ -214,15 +255,6 @@ int list_append(list_head_t *head, struct list_node *node)
     cursor->next = node;
     node->next = *head;
     return 0;
-}
-
-void window_move_resize(xcb_window_t window, int16_t x, int16_t y, int16_t width, int16_t height)
-{
-    uint32_t values[] = {x, y, width, height};
-    xcb_configure_window(global_xconnection, window,
-                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH |
-                             XCB_CONFIG_WINDOW_HEIGHT,
-                         values);
 }
 
 struct client *locate_client_by_win(xcb_window_t window)
@@ -377,39 +409,6 @@ int x11_init(void)
     return 0;
 }
 
-void tile(struct monitor *monitor)
-{
-    uint16_t master_area_width = monitor_width(monitor) * monitor->main_area_fraction;
-    uint16_t master_area_height = monitor_height(monitor) / monitor->main_area_win_num;
-
-    uint64_t clients_idx = 0;
-    struct list_node *clients_cursor = monitor->clients;
-    while (clients_cursor != NULL && clients_idx <= monitor->main_area_win_num) {
-        struct client *client = container_of(clients_cursor, struct client, list_node);
-        window_move_resize(client->window, monitor_x(monitor),
-                           monitor_y(monitor) + master_area_height * clients_idx, master_area_width,
-                           master_area_height);
-        clients_cursor = clients_cursor->next;
-        ++clients_idx;
-    }
-    // TODO: Manage a number of clients.
-    uint64_t clients_left_num = 0;
-    for (struct list_node *cursor = clients_cursor; cursor != NULL; cursor = cursor->next) {
-        ++clients_left_num;
-    }
-
-    clients_idx = 0;
-    uint16_t slave_area_width = monitor_width(monitor) - master_area_width;
-    uint16_t slave_area_height = monitor_height(monitor) / clients_left_num;
-    while (clients_cursor != NULL) {
-        struct client *client = container_of(clients_cursor, struct client, list_node);
-        window_move_resize(client->window, monitor_x(monitor) + master_area_width,
-                           monitor_y(monitor) + slave_area_height * clients_idx, slave_area_width,
-                           slave_area_height);
-        clients_cursor = clients_cursor->next;
-    }
-}
-
 void handle_button_press(xcb_button_press_event_t *event) {}
 void handle_client_message(xcb_client_message_event_t *event) {}
 
@@ -462,24 +461,22 @@ void handle_configure_request(xcb_configure_request_event_t *event)
     if (client->is_floating == true) {
         struct monitor *monitor = client->monitor;
         if (event->value_mask & XCB_CONFIG_WINDOW_X) {
-            client->x = monitor_x(monitor) + event->x;
+            client->x = monitor->x + event->x;
         }
         if (event->value_mask & XCB_CONFIG_WINDOW_Y) {
-            client->y = monitor_y(monitor) + event->y;
+            client->y = monitor->y + event->y;
         }
         if (event->value_mask & XCB_CONFIG_WINDOW_WIDTH) {
-            client->width = monitor_width(monitor) + event->width;
+            client->width = monitor->width + event->width;
         }
         if (event->value_mask & XCB_CONFIG_WINDOW_HEIGHT) {
-            client->height = monitor_height(monitor) + event->height;
+            client->height = monitor->height + event->height;
         }
-        if (client->x + client->width > monitor_x(monitor) + monitor_width(monitor)) {
-            client->x =
-                monitor_x(monitor) + (monitor_width(monitor) / 2 - client_width(client) / 2);
+        if (client->x + client->width > monitor->x + monitor->width) {
+            client->x = monitor->x + (monitor->width / 2 - client_width(client) / 2);
         }
-        if (client->x + client->height > monitor_x(monitor) + monitor_height(monitor)) {
-            client->x =
-                monitor_x(monitor) + (monitor_height(monitor) / 2 - client_height(client) / 2);
+        if (client->x + client->height > monitor->x + monitor->height) {
+            client->x = monitor->x + (monitor->height / 2 - client_height(client) / 2);
         }
         if (event->value_mask & (XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y) &&
             !(event->value_mask & (XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT))) {
@@ -537,13 +534,9 @@ void handle_map_request(xcb_map_request_event_t *event)
     if (locate_client_by_win(event->window) != NULL) {
         return;
     }
-    struct client *new_client =
-        client_create(global_focused_monitor, event->window,
-                      monitor_x(global_focused_monitor) + global_focused_monitor->gap_left,
-                      monitor_y(global_focused_monitor) + global_focused_monitor->gap_top,
-                      monitor_width(global_focused_monitor) - global_focused_monitor->gap_right,
-                      monitor_height(global_focused_monitor) - global_focused_monitor->gap_bottom,
-                      global_border_width);
+    struct client *new_client = client_create(
+        global_focused_monitor, event->window, global_focused_monitor->x, global_focused_monitor->y,
+        global_focused_monitor->width, global_focused_monitor->height, global_border_width);
     list_append(&global_focused_monitor->clients, &new_client->list_node);
     global_focused_monitor->layouts[global_focused_monitor->current_layout].arrange(
         global_focused_monitor);

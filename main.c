@@ -535,7 +535,7 @@ void handle_map_request(xcb_map_request_event_t *event)
     }
 
     struct monitor *monitor = global_focused_monitor;
-    uint8_t tags = 0;
+    uint8_t tags = global_focused_monitor->enabled_tags;
 
     xcb_window_t transient = XCB_NONE;
     xcb_icccm_get_wm_transient_for_reply(

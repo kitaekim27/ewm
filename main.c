@@ -76,10 +76,10 @@ struct monitor {
     float main_area_fraction;
     uint8_t main_area_win_num;
 
-    int16_t crtc_x;
-    int16_t crtc_y;
-    uint16_t crtc_width;
-    uint16_t crtc_height;
+    int16_t x;
+    int16_t y;
+    uint16_t width;
+    uint16_t height;
 
     uint16_t gap_top;
     uint16_t gap_bottom;
@@ -92,6 +92,7 @@ struct monitor {
     struct client *focused_client;
 
     struct layout layouts[2];
+    uint8_t current_layout;
 
     struct list_node list_node;
 };
@@ -104,6 +105,8 @@ static uint16_t global_screen_height = 0;
 
 static list_head_t global_monitors = NULL;
 static struct monitor *global_focused_monitor = NULL;
+
+static const global_border_width = 8;
 
 int client_set_size_hints(struct client *client)
 {
@@ -151,15 +154,15 @@ struct client *client_create(struct monitor *monitor, xcb_window_t window, int16
     return new_client;
 }
 
-struct monitor *monitor_create(xcb_randr_output_t output, int16_t crtc_x, int16_t crtc_y,
-                               size_t crtc_width, size_t crtc_height)
+struct monitor *monitor_create(xcb_randr_output_t output, int16_t x, int16_t y, size_t width,
+                               size_t height)
 {
     struct monitor *new_monitor = (struct monitor *)malloc(sizeof(struct monitor));
     if (new_monitor == NULL) { return NULL; }
-    new_monitor->crtc_x = crtc_x;
-    new_monitor->crtc_y = crtc_y;
-    new_monitor->crtc_width = crtc_width;
-    new_monitor->crtc_height = crtc_height;
+    new_monitor->x = x;
+    new_monitor->y = y;
+    new_monitor->width = width;
+    new_monitor->height = height;
     return new_monitor;
 }
 
@@ -177,13 +180,36 @@ int list_append(list_head_t *head, struct list_node *node)
     return 0;
 }
 
+void client_resize(struct client *client, int16_t x, int16_t y, int16_t width, int16_t height)
+{
+    uint32_t values[] = {x, y, width, height};
+    xcb_configure_window(global_xconnection, client->window,
+                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH |
+                             XCB_CONFIG_WINDOW_HEIGHT,
+                         values);
+}
+
+struct client *locate_client_by_win(xcb_window_t window)
+{
+    for (struct list_node *monitor_cursor = global_monitors; monitor_cursor != NULL;
+         monitor_cursor = monitor_cursor->next) {
+        struct monitor *monitor = container_of(monitor_cursor, struct monitor, list_node);
+        for (struct list_node *client_cursor = monitor->clients; client_cursor != NULL;
+             client_cursor = client_cursor->next) {
+            struct client *client = container_of(client_cursor, struct client, list_node);
+            if (client->window == window) { return client; }
+        }
+    }
+    return NULL;
+}
+
 bool is_unique_crtc(xcb_randr_get_crtc_info_reply_t *crtc_info_reply)
 {
     for (struct list_node *cursor = global_monitors; cursor != NULL; cursor = cursor->next) {
         struct monitor *monitor = container_of(cursor, struct monitor, list_node);
-        if (monitor->crtc_width == crtc_info_reply->width &&
-            monitor->crtc_height == crtc_info_reply->height &&
-            monitor->crtc_x == crtc_info_reply->x && monitor->crtc_y == crtc_info_reply->y) {
+        if (monitor->width == crtc_info_reply->width &&
+            monitor->height == crtc_info_reply->height && monitor->x == crtc_info_reply->x &&
+            monitor->y == crtc_info_reply->y) {
             return false;
         }
     }
@@ -203,19 +229,19 @@ int update_monitors(void)
 
     size_t outputs_len = xcb_randr_get_screen_resources_outputs_length(screen_resources_reply);
     xcb_randr_output_t *outputs = xcb_randr_get_screen_resources_outputs(screen_resources_reply);
-    xcb_randr_get_output_info_cookie_t *get_output_info_cookies =
+    xcb_randr_get_output_info_cookie_t *output_info_cookies =
         (xcb_randr_get_output_info_cookie_t *)calloc(outputs_len,
                                                      sizeof(xcb_randr_get_output_info_cookie_t));
-    if (get_output_info_cookies == NULL) { return 1; }
+    if (output_info_cookies == NULL) { return 1; }
 
     for (uint64_t i = 0; i < outputs_len; ++i) {
-        get_output_info_cookies[i] =
+        output_info_cookies[i] =
             xcb_randr_get_output_info(global_xconnection, outputs[i], XCB_CURRENT_TIME);
     }
 
     for (uint64_t i = 0; i < outputs_len; ++i) {
         xcb_randr_get_output_info_reply_t *output_info_reply =
-            xcb_randr_get_output_info_reply(global_xconnection, get_output_info_cookies[i], NULL);
+            xcb_randr_get_output_info_reply(global_xconnection, output_info_cookies[i], NULL);
         if (output_info_reply == NULL) { continue; }
 
         xcb_randr_get_crtc_info_reply_t *crtc_info_reply = xcb_randr_get_crtc_info_reply(
@@ -236,7 +262,7 @@ int update_monitors(void)
         free(output_info_reply);
     }
 
-    free(get_output_info_cookies);
+    free(output_info_cookies);
     free(screen_resources_reply);
 
     // TODO: Update contents of each monitors.
@@ -307,18 +333,35 @@ int x11_init(void)
     return 0;
 }
 
-struct client *locate_client(xcb_window_t window)
+void tile(struct monitor *monitor)
 {
-    for (struct list_node *monitor_cursor = global_monitors; monitor_cursor != NULL;
-         monitor_cursor = monitor_cursor->next) {
-        struct monitor *monitor = container_of(monitor_cursor, struct monitor, list_node);
-        for (struct list_node *client_cursor = monitor->clients; client_cursor != NULL;
-             client_cursor = client_cursor->next) {
-            struct client *client = container_of(client_cursor, struct client, list_node);
-            if (client->window == window) { return client; }
-        }
+    uint16_t master_area_width = monitor->width * monitor->main_area_fraction;
+    uint16_t master_area_height = monitor->height / monitor->main_area_win_num;
+
+    uint64_t clients_idx = 0;
+    struct list_node *clients_cursor = monitor->clients;
+    while (clients_cursor != NULL && clients_idx <= monitor->main_area_win_num) {
+        struct client *client = container_of(clients_cursor, struct client, list_node);
+        client_resize(client, monitor->x, monitor->y + master_area_height * clients_idx,
+                      master_area_width, master_area_height);
+        clients_cursor = clients_cursor->next;
     }
-    return NULL;
+    // TODO: Manage a number of clients.
+    uint64_t clients_left_num = 0;
+    for (struct list_node *cursor = clients_cursor; cursor != NULL; cursor = cursor->next) {
+        ++clients_left_num;
+    }
+
+    clients_idx = 0;
+    uint16_t slave_area_height = monitor->height / clients_left_num;
+    uint16_t slave_area_width = monitor->width - master_area_width;
+    while (clients_cursor != NULL) {
+        struct client *client = container_of(clients_cursor, struct client, list_node);
+        client_resize(client, monitor->x + master_area_width,
+                      monitor->y + slave_area_height * clients_idx, slave_area_width,
+                      slave_area_height);
+        clients_cursor = clients_cursor->next;
+    }
 }
 
 void handle_button_press(xcb_button_press_event_t *event) {}
@@ -338,7 +381,7 @@ void handle_configure_request(xcb_configure_request_event_t *event)
     fprintf(stdout, "DEBUG: event->parent=%u\n", event->parent);
     fprintf(stdout, "DEBUG: event->window=%u\n", event->window);
 
-    struct client *client = locate_client(event->parent);
+    struct client *client = locate_client_by_win(event->parent);
     if (client == NULL) {
         uint32_t values[7];
         uint8_t values_idx = 0;
@@ -378,46 +421,6 @@ void handle_configure_request(xcb_configure_request_event_t *event)
                    (const char *)&notify_event);
 }
 
-void client_resize(struct client *client, int16_t x, int16_t y, int16_t width, int16_t height)
-{
-    uint32_t values[] = {x, y, width, height};
-    xcb_configure_window(global_xconnection, client->window,
-                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH |
-                             XCB_CONFIG_WINDOW_HEIGHT,
-                         values);
-}
-
-void tile(struct monitor *monitor)
-{
-    uint16_t master_area_width = monitor->crtc_width * monitor->main_area_fraction;
-    uint16_t master_area_height = monitor->crtc_height / monitor->main_area_win_num;
-
-    uint64_t clients_idx = 0;
-    struct list_node *clients_cursor = monitor->clients;
-    while (clients_cursor != NULL && clients_idx <= monitor->main_area_win_num) {
-        struct client *client = container_of(clients_cursor, struct client, list_node);
-        client_resize(client, monitor->crtc_x, monitor->crtc_y + master_area_height * clients_idx,
-                      master_area_width, master_area_height);
-        clients_cursor = clients_cursor->next;
-    }
-    // TODO: Manage a number of clients.
-    uint64_t clients_left_num = 0;
-    for (struct list_node *cursor = clients_cursor; cursor != NULL; cursor = cursor->next) {
-        ++clients_left_num;
-    }
-
-    clients_idx = 0;
-    uint16_t slave_area_height = monitor->crtc_height / clients_left_num;
-    uint16_t slave_area_width = monitor->crtc_width - master_area_width;
-    while (clients_cursor != NULL) {
-        struct client *client = container_of(clients_cursor, struct client, list_node);
-        client_resize(client, monitor->crtc_x + master_area_width,
-                      monitor->crtc_y + slave_area_height * clients_idx, slave_area_width,
-                      slave_area_height);
-        clients_cursor = clients_cursor->next;
-    }
-}
-
 void handle_destroy_notify(xcb_destroy_notify_event_t *event) {}
 void handle_enter_notify(xcb_enter_notify_event_t *event) {}
 void handle_focus_in(xcb_focus_in_event_t *event) {}
@@ -430,14 +433,16 @@ void handle_map_request(xcb_map_request_event_t *event)
     if (window_attributes_reply == NULL || window_attributes_reply->override_redirect != 0) {
         return;
     }
-    if (locate_client(event->parent) != NULL) { return; }
-    struct client *new_client = client_create(global_focused_monitor, event->window, 0, 0, 0, 0, 0);
-    // TODO: Set properties of new_client properly.
+    if (locate_client_by_win(event->window) != NULL) { return; }
+    struct client *new_client = client_create(
+        global_focused_monitor, event->window,
+        global_focused_monitor->x + global_focused_monitor->gap_left,
+        global_focused_monitor->y + global_focused_monitor->gap_top,
+        global_focused_monitor->width - global_focused_monitor->gap_right,
+        global_focused_monitor->height - global_focused_monitor->gap_bottom, global_border_width);
     list_append(&global_focused_monitor->clients, &new_client->list_node);
-    tile(global_focused_monitor);
-    // XSelectInput(dpy, w,
-    // EnterWindowMask|FocusChangeMask|PropertyChangeMask|StructureNotifyMask); grabbuttons(c,
-    // 0);
+    global_focused_monitor->layouts[global_focused_monitor->current_layout].arrange(
+        global_focused_monitor);
     xcb_map_window(global_xconnection, event->window);
 }
 
@@ -499,5 +504,6 @@ int main(int argc, char *argv[])
     }
 
     xcb_disconnect(global_xconnection);
+
     return 0;
 }

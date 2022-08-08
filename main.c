@@ -111,7 +111,7 @@ static uint16_t global_screen_height = 0;
 static list_head_t global_monitors = NULL;
 static struct monitor *global_focused_monitor = NULL;
 
-static const int16_t global_border_width = 8;
+static const int16_t global_client_border_width = 8;
 
 static inline int16_t client_width(struct client *client)
 {
@@ -151,7 +151,7 @@ int client_set_size_hints(struct client *client)
 }
 
 struct client *client_create(struct monitor *monitor, xcb_window_t window, int16_t x, int16_t y,
-                             int16_t width, int16_t height, int16_t border_width)
+                             int16_t width, int16_t height, int16_t border_width, uint8_t tags)
 {
     struct client *new_client = (struct client *)malloc(sizeof(struct client));
     if (new_client == NULL) {
@@ -168,6 +168,7 @@ struct client *client_create(struct monitor *monitor, xcb_window_t window, int16
         free(new_client);
         return NULL;
     }
+    new_client->tags = tags;
     return new_client;
 }
 
@@ -257,7 +258,7 @@ int list_append(list_head_t *head, struct list_node *node)
     return 0;
 }
 
-struct client *locate_client_by_win(xcb_window_t window)
+struct client *get_client_by_win(xcb_window_t window)
 {
     for (struct list_node *monitor_cursor = global_monitors; monitor_cursor != NULL;
          monitor_cursor = monitor_cursor->next) {
@@ -423,7 +424,7 @@ void handle_configure_notify(xcb_configure_notify_event_t *event)
 
 void handle_configure_request(xcb_configure_request_event_t *event)
 {
-    struct client *client = locate_client_by_win(event->window);
+    struct client *client = get_client_by_win(event->window);
 
     if (client == NULL) {
         uint32_t values[7];
@@ -528,19 +529,62 @@ void handle_map_request(xcb_map_request_event_t *event)
 {
     xcb_get_window_attributes_reply_t *window_attributes_reply = xcb_get_window_attributes_reply(
         global_xconnection, xcb_get_window_attributes(global_xconnection, event->window), NULL);
-    if (window_attributes_reply == NULL || window_attributes_reply->override_redirect != 0) {
-        return;
+    if (window_attributes_reply == NULL || window_attributes_reply->override_redirect != 0 ||
+        get_client_by_win(event->window) != NULL) {
+        goto WINDOW_ATTRIBUTES_REPLY_FREE;
     }
-    if (locate_client_by_win(event->window) != NULL) {
-        return;
+
+    struct monitor *monitor = global_focused_monitor;
+    uint8_t tags = 0;
+
+    xcb_window_t transient = XCB_NONE;
+    xcb_icccm_get_wm_transient_for_reply(
+        global_xconnection, xcb_icccm_get_wm_transient_for(global_xconnection, event->window),
+        &transient, NULL);
+    if (transient != XCB_NONE) {
+        struct client *client = get_client_by_win(transient);
+        monitor = client->monitor;
+        tags = client->tags;
     }
-    struct client *new_client = client_create(
-        global_focused_monitor, event->window, global_focused_monitor->x, global_focused_monitor->y,
-        global_focused_monitor->width, global_focused_monitor->height, global_border_width);
-    list_append(&global_focused_monitor->clients, &new_client->list_node);
-    global_focused_monitor->layouts[global_focused_monitor->current_layout].arrange(
-        global_focused_monitor);
+
+    xcb_get_geometry_reply_t *geometry_reply = xcb_get_geometry_reply(
+        global_xconnection, xcb_get_geometry(global_xconnection, event->window), NULL);
+    if (geometry_reply == NULL) {
+        goto GEOMETRY_REPLY_FREE;
+    }
+
+    int16_t x = geometry_reply->x;
+    uint16_t width = geometry_reply->width;
+    if (x + width + 2 * geometry_reply->border_width > global_focused_monitor->x +
+                                                           global_focused_monitor->width +
+                                                           2 * global_client_border_width) {
+        x = global_focused_monitor->x;
+        width = global_focused_monitor->width;
+    }
+
+    int16_t y = geometry_reply->y;
+    uint16_t height = geometry_reply->height;
+    if (y + width + 2 * geometry_reply->border_width > global_focused_monitor->y +
+                                                           global_focused_monitor->height +
+                                                           2 * global_client_border_width) {
+        y = global_focused_monitor->y;
+        height = global_focused_monitor->height;
+    }
+
+    struct client *new_client = client_create(monitor, event->window, x, y, width, height,
+                                              global_client_border_width, tags);
+    if (new_client == NULL) {
+        goto GEOMETRY_REPLY_FREE;
+    }
+
+    list_append(&monitor->clients, &new_client->list_node);
+    monitor->layouts[monitor->current_layout].arrange(monitor);
     xcb_map_window(global_xconnection, event->window);
+
+GEOMETRY_REPLY_FREE:
+    free(geometry_reply);
+WINDOW_ATTRIBUTES_REPLY_FREE:
+    free(window_attributes_reply);
 }
 
 void handle_motion_notify(xcb_motion_notify_event_t *event) {}

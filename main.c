@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <xcb/randr.h>
 #include <xcb/xcb.h>
 #include <xcb/xcb_event.h>
@@ -119,6 +120,28 @@ struct monitor {
 };
 
 static xcb_connection_t *global_xconnection = NULL;
+
+enum {
+    NET_SUPPORTED,
+    NET_WM_NAME,
+    NET_WM_STATE,
+    NET_SUPPORTING_WM_CHECK,
+    NET_WM_STATE_FULLSCREEN,
+    NET_ACTIVE_WINDOW,
+    NET_WM_WINDOW_TYPE,
+    NET_WM_WINDOW_TYPE_DIALOG,
+    NET_CLIENT_LIST,
+    NET_DESKTOP_NAMES,
+    NET_DESKTOP_VIEWPORT,
+    NET_NUMBER_OF_DESKTOPS,
+    NET_CURRENT_DESKTOP,
+    NET_END
+};
+
+enum { WM_PROTOCOLS, WM_DELETE_WINDOW, WM_STATE, WM_TAKE_FOCUS, WM_END };
+
+static xcb_atom_t ewmh_atoms[NET_END];
+static xcb_atom_t window_manager_atoms[WM_END];
 
 static xcb_screen_t *global_screen = NULL;
 static uint16_t global_screen_width = 0;
@@ -487,6 +510,18 @@ int x11_randr_init(void)
     return 0;
 }
 
+xcb_atom_t get_atom(const char *const name)
+{
+    xcb_intern_atom_reply_t *intern_atom_reply = xcb_intern_atom_reply(
+        global_xconnection, xcb_intern_atom(global_xconnection, 0, strlen(name), name), NULL);
+    if (intern_atom_reply == NULL) {
+        return XCB_ATOM_NONE;
+    }
+    xcb_atom_t result = intern_atom_reply->atom;
+    free(intern_atom_reply);
+    return result;
+}
+
 int x11_init(void)
 {
     int32_t screen_num = 0;
@@ -495,6 +530,24 @@ int x11_init(void)
         fprintf(stderr, "Can't connect to X Server!\n");
         return 1;
     }
+
+    ewmh_atoms[NET_ACTIVE_WINDOW] = get_atom("_NET_ACTIVE_WINDOW");
+    ewmh_atoms[NET_SUPPORTED] = get_atom("_NET_SUPPORTED");
+    ewmh_atoms[NET_WM_NAME] = get_atom("_NET_WM_NAME");
+    ewmh_atoms[NET_WM_STATE] = get_atom("_NET_WM_STATE");
+    ewmh_atoms[NET_SUPPORTING_WM_CHECK] = get_atom("_NET_SUPPORTING_WM_CHECK");
+    ewmh_atoms[NET_WM_STATE_FULLSCREEN] = get_atom("_NET_WM_STATE_FULLSCREEN");
+    ewmh_atoms[NET_WM_WINDOW_TYPE] = get_atom("_NET_WM_WINDOW_TYPE");
+    ewmh_atoms[NET_WM_WINDOW_TYPE_DIALOG] = get_atom("_NET_WM_WINDOW_TYPE_DIALOG");
+    ewmh_atoms[NET_CLIENT_LIST] = get_atom("_NET_CLIENT_LIST");
+    ewmh_atoms[NET_DESKTOP_VIEWPORT] = get_atom("_NET_DESKTOP_VIEWPORT");
+    ewmh_atoms[NET_NUMBER_OF_DESKTOPS] = get_atom("_NET_NUMBER_OF_DESKTOPS");
+    ewmh_atoms[NET_CURRENT_DESKTOP] = get_atom("_NET_CURRENT_DESKTOP");
+    ewmh_atoms[NET_DESKTOP_NAMES] = get_atom("_NET_DESKTOP_NAMES");
+    window_manager_atoms[WM_PROTOCOLS] = get_atom("WM_PROTOCOLS");
+    window_manager_atoms[WM_DELETE_WINDOW] = get_atom("WM_DELETE_WINDOW");
+    window_manager_atoms[WM_STATE] = get_atom("WM_STATE");
+    window_manager_atoms[WM_TAKE_FOCUS] = get_atom("WM_TAKE_FOCUS");
 
     xcb_screen_iterator_t iterator = xcb_setup_roots_iterator(xcb_get_setup(global_xconnection));
     for (uint64_t i = 0; i < screen_num; ++i) {
@@ -530,7 +583,14 @@ int x11_init(void)
 }
 
 void handle_button_press(xcb_button_press_event_t *event) {}
-void handle_client_message(xcb_client_message_event_t *event) {}
+
+void handle_client_message(xcb_client_message_event_t *event)
+{
+    struct client *client = get_client_by_win(event->window);
+    if (client == NULL) {
+        return;
+    }
+}
 
 void handle_configure_notify(xcb_configure_notify_event_t *event)
 {

@@ -124,7 +124,7 @@ static xcb_connection_t *global_xconnection = NULL;
 
 enum { WM_PROTOCOLS, WM_DELETE_WINDOW, WM_STATE, WM_TAKE_FOCUS, WM_END };
 
-static xcb_ewmh_connection_t *global_ewmh_connection;
+static xcb_ewmh_connection_t *global_ewmh_connection = NULL;
 static xcb_atom_t global_wm_atoms[WM_END];
 
 static xcb_screen_t *global_screen = NULL;
@@ -399,6 +399,15 @@ struct client *get_client_by_win(xcb_window_t window)
     return NULL;
 }
 
+void client_enable_fullscreen(struct client *const client)
+{
+    struct monitor *monitor = client->monitor;
+    client->is_fullscreen = true;
+    client->is_floating = true;
+    client_move_resize(client, monitor->box.x, monitor->box.y, monitor->box.width,
+                       monitor->box.height);
+}
+
 bool check_unique_crtc(xcb_randr_get_crtc_info_reply_t *crtc_info_reply)
 {
     for (struct list_node *cursor = global_monitors; cursor != NULL; cursor = cursor->next) {
@@ -568,6 +577,29 @@ void handle_client_message(xcb_client_message_event_t *event)
     struct client *client = get_client_by_win(event->window);
     if (client == NULL) {
         return;
+    }
+
+    if (event->type == global_ewmh_connection->_NET_WM_STATE) {
+        if (event->data.data32[1] != global_ewmh_connection->_NET_WM_STATE_FULLSCREEN &&
+            event->data.data32[2] != global_ewmh_connection->_NET_WM_STATE_FULLSCREEN) {
+            return;
+        }
+        if (event->data.data32[0] == XCB_EWMH_WM_STATE_ADD ||
+            event->data.data32[0] == XCB_EWMH_WM_STATE_TOGGLE && client->is_fullscreen == false) {
+            client_enable_fullscreen(client);
+            return;
+        }
+        if (client->is_fullscreen == true) {
+            client_disable_fullscreen(client);
+        }
+        return;
+    }
+
+    if (event->type == global_ewmh_connection->_NET_ACTIVE_WINDOW) {
+        if (client == global_focused_monitor->focused_client || client->is_urgent == true) {
+            return;
+        }
+        seturgent(client);
     }
 }
 

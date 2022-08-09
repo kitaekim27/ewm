@@ -125,7 +125,9 @@ static uint16_t global_screen_height = 0;
 static list_head_t global_monitors = NULL;
 static struct monitor *global_focused_monitor = NULL;
 
-const static int16_t global_client_border_width = 8;
+const static uint32_t global_client_border_width = 8;
+const static uint32_t global_client_unfocus_pixel = 0x000000;
+const static uint32_t global_client_focus_pixel = 0x000000;
 const static bool should_respect_size_hints = true;
 
 int list_append(list_head_t *head, struct list_node *const node)
@@ -646,7 +648,62 @@ WINDOW_ATTRIBUTES_REPLY_FREE:
     free(window_attributes_reply);
 }
 
-void handle_motion_notify(xcb_motion_notify_event_t *event) {}
+static inline uint32_t get_intersect_area_size(struct box a, struct box b)
+{
+    return max(0, (min(a.x + a.width, b.x + b.width) - max(a.x, b.x))) *
+           max(0, (min(a.y + a.height, b.x + b.height) - max(a.y, b.y)));
+}
+
+static inline struct monitor *get_monitor_by_box(struct box box)
+{
+    struct monitor *result = NULL;
+    uint32_t max_intersect_area_size = 0;
+    for (struct list_node *cursor = global_monitors; cursor != NULL; cursor = cursor->next) {
+        struct monitor *monitor = container_of(cursor, struct monitor, list_node);
+        uint32_t intersect_area_size = get_intersect_area_size(box, monitor->box);
+        if (intersect_area_size <= max_intersect_area_size) {
+            continue;
+        }
+        max_intersect_area_size = intersect_area_size;
+        result = monitor;
+    }
+    return result;
+}
+
+void client_unfocus(const struct client *const client)
+{
+    uint32_t values[] = {global_client_border_width, global_client_unfocus_pixel};
+    xcb_configure_window(global_xconnection, client->window,
+                         XCB_CONFIG_WINDOW_BORDER_WIDTH | XCB_CW_BORDER_PIXEL, values);
+}
+
+void client_focus(const struct client *const client)
+{
+    uint32_t values[] = {global_client_border_width, global_client_focus_pixel};
+    xcb_configure_window(global_xconnection, client->window,
+                         XCB_CONFIG_WINDOW_BORDER_WIDTH | XCB_CW_BORDER_PIXEL, values);
+}
+
+void monitor_focus(struct monitor *const monitor)
+{
+    client_unfocus(global_focused_monitor->focused_client);
+    global_focused_monitor = monitor;
+    client_focus(global_focused_monitor->focused_client);
+}
+
+void handle_motion_notify(xcb_motion_notify_event_t *event)
+{
+    if (event->root != global_screen->root) {
+        return;
+    }
+    struct box mouse_box = {event->root_x, event->root_y, 1, 1};
+    struct monitor *monitor = get_monitor_by_box(mouse_box);
+    if (monitor == NULL || monitor == global_focused_monitor) {
+        return;
+    }
+    monitor_focus(monitor);
+}
+
 void handle_property_notify(xcb_property_notify_event_t *event) {}
 void handle_unmap_notify(xcb_unmap_notify_event_t *event) {}
 

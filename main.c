@@ -6,6 +6,7 @@
 #include <xcb/randr.h>
 #include <xcb/xcb.h>
 #include <xcb/xcb_event.h>
+#include <xcb/xcb_ewmh.h>
 #include <xcb/xcb_icccm.h>
 
 #define MASK_TAG0 (0)
@@ -121,27 +122,10 @@ struct monitor {
 
 static xcb_connection_t *global_xconnection = NULL;
 
-enum {
-    NET_SUPPORTED,
-    NET_WM_NAME,
-    NET_WM_STATE,
-    NET_SUPPORTING_WM_CHECK,
-    NET_WM_STATE_FULLSCREEN,
-    NET_ACTIVE_WINDOW,
-    NET_WM_WINDOW_TYPE,
-    NET_WM_WINDOW_TYPE_DIALOG,
-    NET_CLIENT_LIST,
-    NET_DESKTOP_NAMES,
-    NET_DESKTOP_VIEWPORT,
-    NET_NUMBER_OF_DESKTOPS,
-    NET_CURRENT_DESKTOP,
-    NET_END
-};
-
 enum { WM_PROTOCOLS, WM_DELETE_WINDOW, WM_STATE, WM_TAKE_FOCUS, WM_END };
 
-static xcb_atom_t ewmh_atoms[NET_END];
-static xcb_atom_t window_manager_atoms[WM_END];
+static xcb_ewmh_connection_t *global_ewmh_connection;
+static xcb_atom_t global_wm_atoms[WM_END];
 
 static xcb_screen_t *global_screen = NULL;
 static uint16_t global_screen_width = 0;
@@ -531,23 +515,18 @@ int x11_init(void)
         return 1;
     }
 
-    ewmh_atoms[NET_ACTIVE_WINDOW] = get_atom("_NET_ACTIVE_WINDOW");
-    ewmh_atoms[NET_SUPPORTED] = get_atom("_NET_SUPPORTED");
-    ewmh_atoms[NET_WM_NAME] = get_atom("_NET_WM_NAME");
-    ewmh_atoms[NET_WM_STATE] = get_atom("_NET_WM_STATE");
-    ewmh_atoms[NET_SUPPORTING_WM_CHECK] = get_atom("_NET_SUPPORTING_WM_CHECK");
-    ewmh_atoms[NET_WM_STATE_FULLSCREEN] = get_atom("_NET_WM_STATE_FULLSCREEN");
-    ewmh_atoms[NET_WM_WINDOW_TYPE] = get_atom("_NET_WM_WINDOW_TYPE");
-    ewmh_atoms[NET_WM_WINDOW_TYPE_DIALOG] = get_atom("_NET_WM_WINDOW_TYPE_DIALOG");
-    ewmh_atoms[NET_CLIENT_LIST] = get_atom("_NET_CLIENT_LIST");
-    ewmh_atoms[NET_DESKTOP_VIEWPORT] = get_atom("_NET_DESKTOP_VIEWPORT");
-    ewmh_atoms[NET_NUMBER_OF_DESKTOPS] = get_atom("_NET_NUMBER_OF_DESKTOPS");
-    ewmh_atoms[NET_CURRENT_DESKTOP] = get_atom("_NET_CURRENT_DESKTOP");
-    ewmh_atoms[NET_DESKTOP_NAMES] = get_atom("_NET_DESKTOP_NAMES");
-    window_manager_atoms[WM_PROTOCOLS] = get_atom("WM_PROTOCOLS");
-    window_manager_atoms[WM_DELETE_WINDOW] = get_atom("WM_DELETE_WINDOW");
-    window_manager_atoms[WM_STATE] = get_atom("WM_STATE");
-    window_manager_atoms[WM_TAKE_FOCUS] = get_atom("WM_TAKE_FOCUS");
+    global_ewmh_connection = (xcb_ewmh_connection_t *)malloc(sizeof(xcb_ewmh_connection_t));
+    if (xcb_ewmh_init_atoms_replies(global_ewmh_connection,
+                                    xcb_ewmh_init_atoms(global_xconnection, global_ewmh_connection),
+                                    NULL) != 0) {
+        fprintf(stderr, "Can't initialize EWMH atoms!\n");
+        return 1;
+    }
+
+    global_wm_atoms[WM_PROTOCOLS] = get_atom("WM_PROTOCOLS");
+    global_wm_atoms[WM_DELETE_WINDOW] = get_atom("WM_DELETE_WINDOW");
+    global_wm_atoms[WM_STATE] = get_atom("WM_STATE");
+    global_wm_atoms[WM_TAKE_FOCUS] = get_atom("WM_TAKE_FOCUS");
 
     xcb_screen_iterator_t iterator = xcb_setup_roots_iterator(xcb_get_setup(global_xconnection));
     for (uint64_t i = 0; i < screen_num; ++i) {

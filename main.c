@@ -89,7 +89,7 @@ static inline int16_t client_height(const struct client *const client)
 
 struct layout {
     char name[32];
-    void (*arrange)(struct monitor *);
+    void (*arrange)(const struct monitor *const);
 };
 
 struct monitor {
@@ -107,6 +107,7 @@ struct monitor {
     uint16_t gap_left;
     uint16_t gap_right;
 
+    uint64_t clients_num;
     list_head_t clients;
     struct client *focused_client;
 
@@ -128,6 +129,7 @@ static struct monitor *global_focused_monitor = NULL;
 const static uint32_t global_client_border_width = 8;
 const static uint32_t global_client_unfocus_pixel = 0x000000;
 const static uint32_t global_client_focus_pixel = 0x000000;
+
 const static bool should_respect_size_hints = true;
 
 int list_append(list_head_t *head, struct list_node *const node)
@@ -226,7 +228,7 @@ IGNORE_ASPECT_RATIO:
 struct client *client_create(struct monitor *monitor, xcb_window_t window, int16_t x, int16_t y,
                              uint16_t width, uint16_t height, int16_t border_width, uint8_t tags)
 {
-    struct client *new_client = (struct client *)malloc(sizeof(struct client));
+    struct client *new_client = (struct client *)calloc(1, sizeof(struct client));
     if (new_client == NULL) {
         return NULL;
     }
@@ -241,6 +243,25 @@ struct client *client_create(struct monitor *monitor, xcb_window_t window, int16
     new_client->border_width = border_width;
     new_client->tags = tags;
     return new_client;
+}
+
+void client_configure(const struct client *const client)
+{
+    xcb_configure_notify_event_t notify_event;
+
+    notify_event.response_type = XCB_CONFIGURE_NOTIFY;
+    notify_event.event = client->window;
+    notify_event.window = client->window;
+    notify_event.above_sibling = XCB_NONE;
+    notify_event.x = client->box.x;
+    notify_event.y = client->box.y;
+    notify_event.width = client->box.width;
+    notify_event.height = client->box.height;
+    notify_event.border_width = client->border_width;
+    notify_event.override_redirect = false;
+
+    xcb_send_event(global_xconnection, false, client->window, XCB_EVENT_MASK_STRUCTURE_NOTIFY,
+                   (char *)&notify_event);
 }
 
 void client_move_resize(struct client *client, int16_t x, int16_t y, uint16_t width,
@@ -258,9 +279,11 @@ void client_move_resize(struct client *client, int16_t x, int16_t y, uint16_t wi
                          values);
 }
 
-void monitor_tile(struct monitor *monitor)
+void monitor_tile(const struct monitor *const monitor)
 {
-    uint16_t main_area_width = monitor->box.width * monitor->main_area_fraction;
+    uint16_t main_area_width = monitor->clients_num <= monitor->main_area_win_num
+                                   ? monitor->box.width
+                                   : monitor->box.width * monitor->main_area_fraction;
     uint16_t main_win_height = monitor->box.height / monitor->main_area_win_num;
 
     uint64_t clients_idx = 0;
@@ -273,19 +296,15 @@ void monitor_tile(struct monitor *monitor)
         ++clients_idx;
     }
 
-    uint64_t clients_left_num = 0;
-    for (struct list_node *cursor = clients_cursor; cursor != NULL; cursor = cursor->next) {
-        ++clients_left_num;
-    }
-
+    uint64_t clients_left_num = monitor->clients_num - clients_idx;
     clients_idx = 0;
-    uint16_t slave_area_width = monitor->box.width - main_area_width;
-    uint16_t slave_win_height = monitor->box.height / clients_left_num;
+    uint16_t sub_area_width = monitor->box.width - main_area_width;
+    uint16_t sub_win_height = monitor->box.height / clients_left_num;
     while (clients_cursor != NULL) {
         struct client *client = container_of(clients_cursor, struct client, list_node);
         client_move_resize(client, monitor->box.x + main_area_width,
-                           monitor->box.y + slave_win_height * clients_idx, slave_area_width,
-                           slave_win_height);
+                           monitor->box.y + sub_win_height * clients_idx, sub_area_width,
+                           sub_win_height);
         clients_cursor = clients_cursor->next;
     }
 }
@@ -293,7 +312,7 @@ void monitor_tile(struct monitor *monitor)
 struct monitor *monitor_create(xcb_randr_output_t output, int16_t crtc_x, int16_t crtc_y,
                                size_t crtc_width, size_t crtc_height)
 {
-    struct monitor *new_monitor = (struct monitor *)malloc(sizeof(struct monitor));
+    struct monitor *new_monitor = (struct monitor *)calloc(1, sizeof(struct monitor));
     if (new_monitor == NULL) {
         return NULL;
     }
@@ -315,6 +334,12 @@ struct monitor *monitor_create(xcb_randr_output_t output, int16_t crtc_x, int16_
     new_monitor->layouts[0] = layout_tile;
     new_monitor->current_layout_idx = 0;
     return new_monitor;
+}
+
+void monitor_add_client(struct monitor *monitor, struct client *client)
+{
+    list_append(&monitor->clients, &client->list_node);
+    ++monitor->clients_num;
 }
 
 struct client *get_client_by_win(xcb_window_t window)
@@ -472,20 +497,11 @@ int x11_init(void)
 
 void handle_button_press(xcb_button_press_event_t *event) {}
 void handle_client_message(xcb_client_message_event_t *event) {}
-
-void handle_configure_notify(xcb_configure_notify_event_t *event)
-{
-    if (event->window != global_screen->root) {
-        return;
-    }
-    global_screen_height = event->width;
-    global_screen_height = event->height;
-}
+void handle_configure_notify(xcb_configure_notify_event_t *event) {}
 
 void handle_configure_request(xcb_configure_request_event_t *event)
 {
     struct client *client = get_client_by_win(event->window);
-
     if (client == NULL) {
         uint32_t values[7];
         uint8_t i = 0;
@@ -519,66 +535,38 @@ void handle_configure_request(xcb_configure_request_event_t *event)
         return;
     }
 
-    if (client->is_floating == true) {
-        struct monitor *monitor = client->monitor;
-        if (event->value_mask & XCB_CONFIG_WINDOW_X) {
-            client->box.x = monitor->box.x + event->x;
-        }
-        if (event->value_mask & XCB_CONFIG_WINDOW_Y) {
-            client->box.y = monitor->box.y + event->y;
-        }
-        if (event->value_mask & XCB_CONFIG_WINDOW_WIDTH) {
-            client->box.width = monitor->box.width + event->width;
-        }
-        if (event->value_mask & XCB_CONFIG_WINDOW_HEIGHT) {
-            client->box.height = monitor->box.height + event->height;
-        }
-        if (client->box.x + client->box.width > monitor->box.x + monitor->box.width) {
-            client->box.x = monitor->box.x + (monitor->box.width / 2 - client_width(client) / 2);
-        }
-        if (client->box.x + client->box.height > monitor->box.x + monitor->box.height) {
-            client->box.x = monitor->box.x + (monitor->box.height / 2 - client_height(client) / 2);
-        }
-        if (event->value_mask & (XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y) &&
-            !(event->value_mask & (XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT))) {
-            xcb_configure_notify_event_t notify_event;
-
-            notify_event.response_type = XCB_CONFIGURE_NOTIFY;
-            notify_event.event = client->window;
-            notify_event.window = client->window;
-            notify_event.above_sibling = XCB_NONE;
-            notify_event.x = client->box.x;
-            notify_event.y = client->box.y;
-            notify_event.width = client->box.width;
-            notify_event.height = client->box.height;
-            notify_event.border_width = client->border_width;
-            notify_event.override_redirect = false;
-
-            xcb_send_event(global_xconnection, false, event->window,
-                           XCB_EVENT_MASK_STRUCTURE_NOTIFY, (const char *)&notify_event);
-        }
-        if (client->tags & monitor->enabled_tags) {
-            client_move_resize(client, client->box.x, client->box.y, client->box.width,
-                               client->box.height);
-        }
+    if (client->is_floating == false) {
+        client_configure(client);
         return;
     }
 
-    xcb_configure_notify_event_t notify_event;
-
-    notify_event.response_type = XCB_CONFIGURE_NOTIFY;
-    notify_event.event = client->window;
-    notify_event.window = client->window;
-    notify_event.above_sibling = XCB_NONE;
-    notify_event.x = client->box.x;
-    notify_event.y = client->box.y;
-    notify_event.width = client->box.width;
-    notify_event.height = client->box.height;
-    notify_event.border_width = client->border_width;
-    notify_event.override_redirect = false;
-
-    xcb_send_event(global_xconnection, false, event->window, XCB_EVENT_MASK_STRUCTURE_NOTIFY,
-                   (const char *)&notify_event);
+    struct monitor *monitor = client->monitor;
+    if (event->value_mask & XCB_CONFIG_WINDOW_X) {
+        client->box.x = monitor->box.x + event->x;
+    }
+    if (event->value_mask & XCB_CONFIG_WINDOW_Y) {
+        client->box.y = monitor->box.y + event->y;
+    }
+    if (event->value_mask & XCB_CONFIG_WINDOW_WIDTH) {
+        client->box.width = monitor->box.width + event->width;
+    }
+    if (event->value_mask & XCB_CONFIG_WINDOW_HEIGHT) {
+        client->box.height = monitor->box.height + event->height;
+    }
+    if (client->box.x + client->box.width > monitor->box.x + monitor->box.width) {
+        client->box.x = monitor->box.x + (monitor->box.width / 2 - client_width(client) / 2);
+    }
+    if (client->box.x + client->box.height > monitor->box.x + monitor->box.height) {
+        client->box.x = monitor->box.x + (monitor->box.height / 2 - client_height(client) / 2);
+    }
+    if (event->value_mask & (XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y) &&
+        !(event->value_mask & (XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT))) {
+        client_configure(client);
+    }
+    if (client->tags & monitor->enabled_tags) {
+        client_move_resize(client, client->box.x, client->box.y, client->box.width,
+                           client->box.height);
+    }
 }
 
 void handle_destroy_notify(xcb_destroy_notify_event_t *event) {}
@@ -638,7 +626,7 @@ void handle_map_request(xcb_map_request_event_t *event)
         goto GEOMETRY_REPLY_FREE;
     }
 
-    list_append(&monitor->clients, &new_client->list_node);
+    monitor_add_client(monitor, new_client);
     monitor->layouts[monitor->current_layout_idx].arrange(monitor);
     xcb_map_window(global_xconnection, event->window);
 
@@ -686,9 +674,13 @@ void client_focus(const struct client *const client)
 
 void monitor_focus(struct monitor *const monitor)
 {
-    client_unfocus(global_focused_monitor->focused_client);
+    if (global_focused_monitor->focused_client != NULL) {
+        client_unfocus(global_focused_monitor->focused_client);
+    }
     global_focused_monitor = monitor;
-    client_focus(global_focused_monitor->focused_client);
+    if (global_focused_monitor->focused_client != NULL) {
+        client_focus(global_focused_monitor->focused_client);
+    }
 }
 
 void handle_motion_notify(xcb_motion_notify_event_t *event)

@@ -28,6 +28,7 @@
 #define min(A, B) ((A) < (B) ? (A) : (B))
 
 struct list_node {
+    struct list_node *prev;
     struct list_node *next;
 };
 
@@ -132,20 +133,28 @@ const static uint32_t global_client_focus_pixel = 0x000000;
 
 const static bool should_respect_size_hints = true;
 
-int list_append(list_head_t *head, struct list_node *const node)
+void list_append(list_head_t *head, struct list_node *const node)
 {
     if (head == NULL) {
         *head = node;
+        node->prev = *head;
         node->next = *head;
-        return 0;
+        return;
     }
     struct list_node *cursor = NULL;
     while (cursor->next != NULL) {
         cursor = cursor->next;
     }
+    node->prev = cursor;
     cursor->next = node;
     node->next = *head;
-    return 0;
+    return;
+}
+
+void list_remove(list_head_t *head, struct list_node *const node)
+{
+    node->prev->next = node->next;
+    node->next->prev = node->prev;
 }
 
 int client_set_size_hints(struct client *const client)
@@ -336,10 +345,35 @@ struct monitor *monitor_create(xcb_randr_output_t output, int16_t crtc_x, int16_
     return new_monitor;
 }
 
-void monitor_add_client(struct monitor *monitor, struct client *client)
+void monitor_append_client(struct monitor *monitor, struct client *client)
 {
     list_append(&monitor->clients, &client->list_node);
     ++monitor->clients_num;
+}
+
+void client_unfocus(const struct client *const client)
+{
+    uint32_t values[] = {global_client_border_width, global_client_unfocus_pixel};
+    xcb_configure_window(global_xconnection, client->window,
+                         XCB_CONFIG_WINDOW_BORDER_WIDTH | XCB_CW_BORDER_PIXEL, values);
+}
+
+void client_focus(const struct client *const client)
+{
+    uint32_t values[] = {global_client_border_width, global_client_focus_pixel};
+    xcb_configure_window(global_xconnection, client->window,
+                         XCB_CONFIG_WINDOW_BORDER_WIDTH | XCB_CW_BORDER_PIXEL, values);
+}
+
+void monitor_remove_client(struct monitor *monitor, struct client *client)
+{
+    list_remove(&monitor->clients, &client->list_node);
+    --monitor->clients_num;
+    if (monitor->clients == NULL || client != monitor->focused_client) {
+        return;
+    }
+    monitor->focused_client = container_of(monitor->clients->prev, struct client, list_node);
+    client_focus(monitor->focused_client);
 }
 
 struct client *get_client_by_win(xcb_window_t window)
@@ -497,7 +531,11 @@ int x11_init(void)
 
 void handle_button_press(xcb_button_press_event_t *event) {}
 void handle_client_message(xcb_client_message_event_t *event) {}
-void handle_configure_notify(xcb_configure_notify_event_t *event) {}
+
+void handle_configure_notify(xcb_configure_notify_event_t *event)
+{
+    ;
+}
 
 void handle_configure_request(xcb_configure_request_event_t *event)
 {
@@ -569,7 +607,18 @@ void handle_configure_request(xcb_configure_request_event_t *event)
     }
 }
 
-void handle_destroy_notify(xcb_destroy_notify_event_t *event) {}
+void handle_destroy_notify(xcb_destroy_notify_event_t *event)
+{
+    struct client *client = get_client_by_win(event->window);
+    if (client == NULL) {
+        return;
+    }
+    struct monitor *monitor = client->monitor;
+    monitor_remove_client(monitor, client);
+    free(client);
+    monitor->layouts[monitor->current_layout_idx].arrange(monitor);
+}
+
 void handle_enter_notify(xcb_enter_notify_event_t *event) {}
 void handle_focus_in(xcb_focus_in_event_t *event) {}
 void handle_mapping_notify(xcb_mapping_notify_event_t *event) {}
@@ -626,7 +675,7 @@ void handle_map_request(xcb_map_request_event_t *event)
         goto GEOMETRY_REPLY_FREE;
     }
 
-    monitor_add_client(monitor, new_client);
+    monitor_append_client(monitor, new_client);
     monitor->layouts[monitor->current_layout_idx].arrange(monitor);
     xcb_map_window(global_xconnection, event->window);
 
@@ -656,20 +705,6 @@ static inline struct monitor *get_monitor_by_box(struct box box)
         result = monitor;
     }
     return result;
-}
-
-void client_unfocus(const struct client *const client)
-{
-    uint32_t values[] = {global_client_border_width, global_client_unfocus_pixel};
-    xcb_configure_window(global_xconnection, client->window,
-                         XCB_CONFIG_WINDOW_BORDER_WIDTH | XCB_CW_BORDER_PIXEL, values);
-}
-
-void client_focus(const struct client *const client)
-{
-    uint32_t values[] = {global_client_border_width, global_client_focus_pixel};
-    xcb_configure_window(global_xconnection, client->window,
-                         XCB_CONFIG_WINDOW_BORDER_WIDTH | XCB_CW_BORDER_PIXEL, values);
 }
 
 void monitor_focus(struct monitor *const monitor)
